@@ -187,14 +187,14 @@ def build_vless_line(domain: str, latency_ms: Optional[float]) -> str:
         .replace("自定义2", latency_text)
     )
 
-def write_top20(results: List[Tuple[str, Optional[float]]], output_path: str = "domain.txt") -> None:
+def write_top30(results: List[Tuple[str, Optional[float]]], output_path: str = "domain.txt") -> None:
     # Sort: successful first by latency asc, then failures at the end
     results_sorted = sorted(
         results,
         key=lambda item: (1, float("inf")) if item[1] is None else (0, item[1])
     )
-    top20 = results_sorted[:20]
-    lines = [build_vless_line(domain, ms) for domain, ms in top20]
+    top30 = results_sorted[:30]
+    lines = [build_vless_line(domain, ms) for domain, ms in top30]
     with open(output_path, "w", encoding="utf-8") as f:
         for line in lines:
             f.write(line + "\n")
@@ -202,12 +202,12 @@ def write_top20(results: List[Tuple[str, Optional[float]]], output_path: str = "
 async def main() -> None:
     domains = normalize_domains(RAW_ITEMS)
     results = await gather_latencies(domains)
-    write_top20(results)
+    write_top30(results)
     # Also print a brief summary
     printable = sorted(
         results,
         key=lambda item: (1, float("inf")) if item[1] is None else (0, item[1])
-    )[:20]
+    )[:30]
     for domain, ms in printable:
         status = "timeout" if ms is None else f"{int(round(ms))}ms"
         print(f"{domain}#CF|优选域名|{status}")
