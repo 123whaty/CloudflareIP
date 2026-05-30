@@ -2,17 +2,20 @@ import socket
 import re
 import time
 import threading
+import random
+import ipaddress
 from queue import Queue
 from datetime import datetime
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # Cloudflare节点测试配置参数
-TEST_TIMEOUT = 3  # 测试超时时间(秒)
-TEST_PORT = 443   # 测试端口
-MAX_THREADS = 3  # 最大线程数
-TOP_NODES = 30    # 显示和保存前N个最快节点
-TXT_OUTPUT_FILE = "NL.txt"    # TXT结果保存文件
+TEST_TIMEOUT = 3          # 测试超时时间(秒)
+TEST_PORT = 443           # 测试端口
+MAX_THREADS = 3           # 最大线程数
+TOP_NODES = 30            # 显示和保存前N个最快节点
+TXT_OUTPUT_FILE = "NL.txt" # TXT结果保存文件
+SAMPLES_PER_RANGE = 20    # 每个IP段随机抽取的IP数量
 
 # 国家代码到中文国家名称的映射
 COUNTRY_CODES = {
@@ -109,16 +112,15 @@ def get_ip_country(ip):
             print(f"ip-api.com错误 {ip}: {str(e)}")
         
         # 基于IP地址范围的简单判断 (Cloudflare IP范围)
-        # 这些IP看起来是Cloudflare的IP地址
         octets = ip.split('.')
         if octets[0] == '104' and octets[1] == '18':
-            return '美国'  # Cloudflare US IPs
+            return '美国'
         elif octets[0] == '108' and octets[1] == '162':
-            return '美国'  # Cloudflare US IPs
+            return '美国'
         elif octets[0] == '162' and octets[1] == '159':
-            return '美国'  # Cloudflare US IPs
+            return '美国'
         elif octets[0] == '172' and octets[1] == '64':
-            return '美国'  # Cloudflare US IPs
+            return '美国'
         
         return '未知'
     except Exception as e:
@@ -141,30 +143,27 @@ def clean_ip(ip_str):
 # Cloudflare节点测试类
 class CloudflareNodeTester:
     def __init__(self):
-        self.nodes = set()  # 存储节点IP，使用set避免重复
-        self.results = []   # 存储测试结果
+        self.nodes = set()          # 存储节点IP，使用set避免重复
+        self.results = []           # 存储测试结果
         self.lock = threading.Lock()
     
-    def fetch_known_nodes(self):
-        """从公开来源获取已知的Cloudflare节点IP"""
-
-        
-        # 常见的Cloudflare IP段
+    def fetch_known_nodes(self, samples_per_range=SAMPLES_PER_RANGE):
+        """从公开的Cloudflare IP段中随机抽取IP地址"""
+        # 荷兰常用的 Cloudflare IP 段
         ip_ranges = [
-"104.20.0.0/24",
-"188.114.96.0/24"
+            "104.20.0.0/24",
+            "188.114.96.0/24"
         ]
         
-        # 从IP段生成部分IP示例
         for ip_range in ip_ranges:
-            base_ip, cidr = ip_range.split('/')
-            octets = base_ip.split('.')
-            
-            # 生成该网段的一些示例IP
-            for i in range(1, 10):  # 每个网段生成9个示例IP
-                ip = f"{octets[0]}.{octets[1]}.{octets[2]}.{i + int(octets[3])}"
-                self.nodes.add(ip)
+            network = ipaddress.IPv4Network(ip_range, strict=False)
+            all_hosts = list(network.hosts())      # 该网段内所有可用主机地址
+            k = min(samples_per_range, len(all_hosts))
+            selected_hosts = random.sample(all_hosts, k)
+            for host in selected_hosts:
+                self.nodes.add(str(host))
         
+        print(f"已从 {len(ip_ranges)} 个网段随机抽取了 {len(self.nodes)} 个IP地址")
     
     def test_node_speed(self, ip):
         """测试单个节点的连接速度"""
@@ -206,16 +205,14 @@ class CloudflareNodeTester:
                 result = self.test_node_speed(ip)
                 with self.lock:
                     self.results.append(result)
-                    # 每完成360个测试，打印进度
-                    if len(self.results) % 360 == 0:
+                    # 每完成50个测试，打印进度
+                    if len(self.results) % 50 == 0:
                         print(f"已测试 {len(self.results)}/{len(self.nodes)} 个")
             finally:
                 queue.task_done()
     
     def test_all_nodes(self):
         """测试所有节点的速度"""
-
-        
         # 创建任务队列
         queue = Queue()
         for ip in self.nodes:
@@ -231,11 +228,9 @@ class CloudflareNodeTester:
         # 等待所有线程完成
         for thread in threads:
             thread.join()
-        
-
     
     def sort_and_display_results(self):
-        """排序并显示测试结果，包含中文国家信息"""
+        """排序并显示测试结果，包含国家信息"""
         # 过滤出可连接的节点并按响应时间排序
         reachable_nodes = [
             node for node in self.results 
@@ -248,8 +243,7 @@ class CloudflareNodeTester:
             key=lambda x: x['response_time_ms']
         )
         
-        
-        # 显示前N个最快节点，包含中文国家信息
+        # 显示前N个最快节点
         for i, node in enumerate(sorted_nodes[:TOP_NODES], 1):
             country = get_ip_country(node['ip'])
             print(f"{node['ip']}#nl 【荷兰】 NL")
@@ -257,124 +251,85 @@ class CloudflareNodeTester:
         return sorted_nodes
     
     def save_results(self, results):
-        """只保存前30名结果到TXT文件，并显示中文国家信息"""
+        """保存前TOP_NODES个最快节点到TXT文件"""
         try:
-            # 只取前30名结果
-            top_results = results[:30]  # 明确只取前30名
+            # 取前TOP_NODES个结果
+            top_results = results[:TOP_NODES]
             
             with open(TXT_OUTPUT_FILE, 'w', encoding='utf-8') as f:
-                # 清空文件并只写入前30个结果
-                for i, node in enumerate(top_results):
-                    # 获取IP的国家信息（已经是中文）
+                for node in top_results:
                     country = get_ip_country(node['ip'])
                     line = f"{node['ip']}#nl 【荷兰】 NL\n"
                     f.write(line)
             
+            print(f"结果已保存到 {TXT_OUTPUT_FILE} (前{len(top_results)}个节点)")
         except Exception as e:
             print(f"保存结果失败: {e}")
 
-# IP地理位置查询功能
+    def run(self):
+        """运行整个测试流程"""
+        start_time = time.time()
+        
+        self.fetch_known_nodes()
+        self.test_all_nodes()
+        sorted_nodes = self.sort_and_display_results()
+        self.save_results(sorted_nodes)
+        
+        total_time = int(time.time() - start_time)
+        print(f"全部完成，耗时 {total_time} 秒")
+
+# IP地理位置查询功能（保留，未在主流程中使用）
 def batch_query_ip_countries():
     """批量查询IP地址的国家信息(显示中文)"""
     print("\n===== IP地址国家信息批量查询 =====")
     
-    # 从cf_IP.txt文件读取IP地址列表
+    # 从文件读取IP地址列表
     try:
         with open(TXT_OUTPUT_FILE, 'r', encoding='utf-8') as f:
             ip_list = []
             for line in f:
                 line = line.strip()
                 if line and not line.startswith('#') and not line.startswith('=') and ':' in line:
-                    # 从格式 "IP:端口#备注" 中提取IP
                     ip = line.split(':')[0].strip()
                     ip_list.append(ip)
                 elif line and not line.startswith('#') and not line.startswith('=') and ' ' not in line and '.' in line:
-                    # 纯IP地址行
                     ip_list.append(line)
         print(f"从文件读取了 {len(ip_list)} 个IP地址")
     except Exception as e:
         print(f"无法从文件读取IP: {str(e)}")
         print("使用默认IP列表进行演示")
-        # 默认IP列表
         ip_list = [
             "108.162.192.3", "108.162.192.7", "108.162.192.4", "108.162.192.9",
             "162.159.0.4", "162.159.0.1", "162.159.0.3", "108.162.192.2"
         ]
     
-    # 清理并验证IP地址列表
-    cleaned_ips = []
-    for ip in ip_list:
-        cleaned_ip = clean_ip(ip)
-        if cleaned_ip:
-            cleaned_ips.append(cleaned_ip)
-        else:
-            print(f"无效的IP地址: {ip}")
-    
+    cleaned_ips = [clean_ip(ip) for ip in ip_list if clean_ip(ip)]
     print(f"清理后有效IP地址数量: {len(cleaned_ips)}")
     
-    # 获取每个IP的国家信息（已经是中文）
     results = []
     for i, ip in enumerate(cleaned_ips):
         print(f"正在查询 {i+1}/{len(cleaned_ips)}: {ip}")
         country = get_ip_country(ip)
         results.append(f"{ip} {country}")
-        
-        # 添加足够的延迟以避免API请求过于频繁
         if i < len(cleaned_ips) - 1:
-            time.sleep(3)  # 增加延迟到3秒
+            time.sleep(3)
     
-    # 将结果写入文件
-    with open(IP_COUNTRIES_FILE, 'w', encoding='utf-8') as f:
+    with open("ip_countries.txt", 'w', encoding='utf-8') as f:
         for result in results:
             f.write(result + '\n')
     
-    print(f"\n查询完成！结果已保存到 {IP_COUNTRIES_FILE}")
+    print(f"\n查询完成！结果已保存到 ip_countries.txt")
     print(f"处理的IP地址总数: {len(results)}")
-    
-    # 显示有国家信息的IP数量
     successful_queries = sum(1 for r in results if not r.endswith(' 未知'))
     print(f"获取到国家信息的IP数量: {successful_queries}")
     print("===================================")
 
-# Cloudflare节点测试功能
-def test_cloudflare_nodes():
-    """运行Cloudflare节点测试"""
-    print("\n===== Cloudflare节点测速工具 =====")
-    tester = CloudflareNodeTester()
-    tester.run()
-
-# CloudflareNodeTester类的run方法
-def run_cloudflare_tester(self):
-    """运行整个测试流程"""
-    start_time = time.time()
-    
-    # 1. 获取节点
-    self.fetch_known_nodes()
-    
-    # 2. 测试所有节点
-    self.test_all_nodes()
-    
-    # 3. 排序并显示结果
-    sorted_nodes = self.sort_and_display_results()
-    
-    # 4. 保存结果
-    self.save_results(sorted_nodes)
-    
-    total_time = int(time.time() - start_time)
-
-# 添加run方法到CloudflareNodeTester类
-CloudflareNodeTester.run = run_cloudflare_tester
-
 # 主函数 - 直接执行Cloudflare节点测试
 if __name__ == "__main__":
-
     try:
-        # 直接执行Cloudflare节点测试
         tester = CloudflareNodeTester()
         tester.run()
-        
     except KeyboardInterrupt:
         print("\n用户中断了程序")
     except Exception as e:
         print(f"程序出错: {e}")
-
